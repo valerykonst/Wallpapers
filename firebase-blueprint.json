@@ -1,0 +1,25 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and subscription status",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "description": "User email" },
+        "displayName": { "type": "string", "description": "User display name" },
+        "generationCount": { "type": "number", "description": "Number of generations performed" },
+        "isPro": { "type": "boolean", "description": "Whether the user has a pro subscription" },
+        "stripeCustomerId": { "type": "string", "description": "Stripe customer ID" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Account creation time" }
+      },
+      "required": ["uid", "email", "generationCount", "isPro"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile documents"
+    }
+  }
+}
