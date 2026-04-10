@@ -98,7 +98,7 @@ async function startServer() {
     }
 
     // Handle the event
-    console.log(`Received Stripe event: ${event.type}`);
+    console.log(`[WEBHOOK] Received Stripe event: ${event.type} (id: ${event.id})`);
 
     if (event.type === "checkout.session.completed") {
       const session = event.data.object as Stripe.Checkout.Session;
@@ -111,7 +111,7 @@ async function startServer() {
         try {
           console.log(`Attempting to fulfill subscription for user: ${userId} in database: ${firebaseConfig.firestoreDatabaseId}`);
           const userRef = db.collection("users").doc(userId);
-          
+
           // Check if document exists first for better logging
           const doc = await userRef.get();
           if (!doc.exists) {
@@ -137,6 +137,40 @@ async function startServer() {
       } else {
         console.error("No client_reference_id (userId) found in checkout session object.");
       }
+
+    } else if (event.type === "invoice.paid") {
+      const invoice = event.data.object as Stripe.Invoice;
+      const customerId = invoice.customer as string;
+      console.log(`[invoice.paid] customer=${customerId}, customer_email=${invoice.customer_email}, amount_paid=${invoice.amount_paid}, parent_type=${invoice.parent?.type ?? "none"}`);
+
+      if (customerId) {
+        try {
+          const snapshot = await db.collection("users").where("stripeCustomerId", "==", customerId).limit(1).get();
+          if (snapshot.empty) {
+            console.warn(`[invoice.paid] No user found with stripeCustomerId=${customerId}. Cannot activate Pro.`);
+          } else {
+            const userDoc = snapshot.docs[0];
+            await userDoc.ref.update({
+              isPro: true,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+            console.log(`[invoice.paid] Successfully set isPro=true for user ${userDoc.id} (stripeCustomerId=${customerId})`);
+          }
+        } catch (error) {
+          console.error(`[invoice.paid] Firestore error for customer ${customerId}:`, error);
+        }
+      } else {
+        console.error("[invoice.paid] No customer ID present on invoice object.");
+      }
+
+    } else if (event.type === "payment_intent.succeeded") {
+      const pi = event.data.object as Stripe.PaymentIntent;
+      console.log(`[payment_intent.succeeded] customer=${pi.customer}, amount=${pi.amount}, metadata=${JSON.stringify(pi.metadata)}`);
+      console.log(`[UNHANDLED EVENT TYPE] ${event.type} — no action taken`);
+
+    } else {
+      const raw = JSON.stringify(event.data.object);
+      console.log(`[UNHANDLED EVENT TYPE] ${event.type} — no action taken. data.object (truncated): ${raw.slice(0, 500)}`);
     }
 
     res.json({ received: true });
