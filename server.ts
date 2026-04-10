@@ -1,35 +1,51 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
+import { readFileSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import Stripe from "stripe";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import { GoogleGenAI } from "@google/genai";
-import firebaseConfig from "./firebase-applet-config.json" with { type: "json" };
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Load Firebase Config safely
+const firebaseConfig = JSON.parse(
+  readFileSync(new URL("./firebase-applet-config.json", import.meta.url), "utf-8")
+);
+
 // Initialize Firebase Admin
 const getAdminApp = () => {
-  if (admin.apps.length) return admin.app();
-  
-  const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT;
-  if (serviceAccount) {
-    try {
-      return admin.initializeApp({
-        credential: admin.credential.cert(JSON.parse(serviceAccount)),
-        projectId: firebaseConfig.projectId,
-      });
-    } catch (e) {
-      console.error("Failed to parse FIREBASE_SERVICE_ACCOUNT secret:", e);
+  try {
+    if (admin.apps.length) return admin.app();
+    
+    const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT;
+    if (serviceAccount) {
+      try {
+        // Handle potential escaping issues from env vars
+        const cert = typeof serviceAccount === 'string' && serviceAccount.startsWith('{') 
+          ? JSON.parse(serviceAccount) 
+          : serviceAccount;
+
+        return admin.initializeApp({
+          credential: admin.credential.cert(cert),
+          projectId: firebaseConfig.projectId,
+        });
+      } catch (e) {
+        console.error("Failed to parse FIREBASE_SERVICE_ACCOUNT secret. Falling back to default initialization.", e);
+      }
     }
+    
+    return admin.initializeApp({
+      projectId: firebaseConfig.projectId,
+    });
+  } catch (error) {
+    console.error("Critical error during Firebase Admin initialization:", error);
+    // Return a dummy or rethrow depending on how critical this is
+    throw error;
   }
-  
-  return admin.initializeApp({
-    projectId: firebaseConfig.projectId,
-  });
 };
 
 const adminApp = getAdminApp();
