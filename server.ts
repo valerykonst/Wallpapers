@@ -1,28 +1,38 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
-import react from "@vitejs/plugin-react";
-import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import { fileURLToPath } from "url";
-import { config as loadDotenv } from "dotenv";
 import Stripe from "stripe";
 import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import { GoogleGenAI } from "@google/genai";
 import firebaseConfig from "./firebase-applet-config.json" with { type: "json" };
 
-loadDotenv();
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Initialize Firebase Admin
-const adminApp = admin.apps.length 
-  ? admin.app() 
-  : admin.initializeApp({
-      projectId: firebaseConfig.projectId,
-    });
+const getAdminApp = () => {
+  if (admin.apps.length) return admin.app();
+  
+  const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (serviceAccount) {
+    try {
+      return admin.initializeApp({
+        credential: admin.credential.cert(JSON.parse(serviceAccount)),
+        projectId: firebaseConfig.projectId,
+      });
+    } catch (e) {
+      console.error("Failed to parse FIREBASE_SERVICE_ACCOUNT secret:", e);
+    }
+  }
+  
+  return admin.initializeApp({
+    projectId: firebaseConfig.projectId,
+  });
+};
 
+const adminApp = getAdminApp();
 const db = getFirestore(adminApp, firebaseConfig.firestoreDatabaseId);
 
 async function startServer() {
@@ -43,7 +53,7 @@ async function startServer() {
   // Gemini initialization (lazy)
   let genAI: GoogleGenAI | null = null;
   const getGenAI = () => {
-    const key = process.env.GEMINI_API_KEY || process.env.API_KEY;
+    const key = process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY;
     if (!key) return null;
     if (!genAI) {
       genAI = new GoogleGenAI({ apiKey: key });
@@ -72,24 +82,44 @@ async function startServer() {
     }
 
     // Handle the event
+    console.log(`Received Stripe event: ${event.type}`);
+
     if (event.type === "checkout.session.completed") {
       const session = event.data.object as Stripe.Checkout.Session;
       const userId = session.client_reference_id;
       const stripeCustomerId = session.customer as string;
 
+      console.log(`Checkout session completed. Session ID: ${session.id}, User ID: ${userId}`);
+
       if (userId) {
         try {
-          console.log(`Fulfilling subscription for user: ${userId}`);
+          console.log(`Attempting to fulfill subscription for user: ${userId} in database: ${firebaseConfig.firestoreDatabaseId}`);
           const userRef = db.collection("users").doc(userId);
-          await userRef.update({
-            isPro: true,
-            stripeCustomerId: stripeCustomerId,
-            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          });
+          
+          // Check if document exists first for better logging
+          const doc = await userRef.get();
+          if (!doc.exists) {
+            console.warn(`User document ${userId} not found in Firestore. Creating it now.`);
+            await userRef.set({
+              uid: userId,
+              isPro: true,
+              stripeCustomerId: stripeCustomerId,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          } else {
+            await userRef.update({
+              isPro: true,
+              stripeCustomerId: stripeCustomerId,
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+          }
           console.log(`Successfully updated user ${userId} to Pro status`);
         } catch (error) {
-          console.error(`Error updating user ${userId}:`, error);
+          console.error(`Error updating user ${userId} in Firestore:`, error);
         }
+      } else {
+        console.error("No client_reference_id (userId) found in checkout session object.");
       }
     }
 
@@ -105,9 +135,37 @@ async function startServer() {
 
   app.get("/api/config", (req, res) => {
     res.json({
-      hasGeminiKey: !!(process.env.GEMINI_API_KEY || process.env.API_KEY),
-      hasStripeKey: !!process.env.STRIPE_SECRET_KEY
+      hasGeminiKey: !!(process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY),
+      hasStripeKey: !!process.env.STRIPE_SECRET_KEY,
+      hasWebhookSecret: !!process.env.STRIPE_WEBHOOK_SECRET
     });
+  });
+
+  // Emergency manual fulfillment route
+  app.get("/api/force-pro", async (req, res) => {
+    const { userId, secret } = req.query;
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+    if (!webhookSecret || secret !== webhookSecret) {
+      return res.status(403).send("Invalid secret or STRIPE_WEBHOOK_SECRET not configured on server.");
+    }
+
+    if (!userId) {
+      return res.status(400).send("Missing userId parameter.");
+    }
+
+    try {
+      const userRef = db.collection("users").doc(userId as string);
+      await userRef.set({
+        isPro: true,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+      
+      res.send(`Success: User ${userId} upgraded to Pro.`);
+    } catch (error: any) {
+      console.error("Manual fulfillment error:", error);
+      res.status(500).send(`Error: ${error.message}`);
+    }
   });
 
   app.post("/api/generate-wallpaper", async (req, res) => {
@@ -202,18 +260,7 @@ async function startServer() {
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      configFile: false,
-      plugins: [react(), tailwindcss()],
-      define: {
-        "process.env.GEMINI_API_KEY": JSON.stringify(process.env.GEMINI_API_KEY ?? ""),
-      },
-      resolve: {
-        alias: { "@": __dirname },
-      },
-      server: {
-        middlewareMode: true,
-        hmr: process.env.DISABLE_HMR !== "true",
-      },
+      server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
@@ -228,7 +275,9 @@ async function startServer() {
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
     console.log("Environment check:");
-    console.log("- GEMINI_API_KEY:", !!(process.env.GEMINI_API_KEY || process.env.API_KEY) ? "PRESENT" : "MISSING");
+    console.log("- GEMINI_API_KEY:", !!process.env.GEMINI_API_KEY ? "PRESENT" : "MISSING");
+    console.log("- API_KEY:", !!process.env.API_KEY ? "PRESENT" : "MISSING");
+    console.log("- GOOGLE_API_KEY:", !!process.env.GOOGLE_API_KEY ? "PRESENT" : "MISSING");
     console.log("- STRIPE_SECRET_KEY:", !!process.env.STRIPE_SECRET_KEY ? "PRESENT" : "MISSING");
     console.log("- STRIPE_WEBHOOK_SECRET:", !!process.env.STRIPE_WEBHOOK_SECRET ? "PRESENT" : "MISSING");
   });
