@@ -72,8 +72,22 @@ export default function App() {
   useEffect(() => {
     const checkKey = async () => {
       try {
-        const selected = await (window as any).aistudio.hasSelectedApiKey();
-        setHasApiKey(selected);
+        // First check if server has the key
+        const configRes = await fetch('/api/config');
+        const config = await configRes.json();
+        
+        if (config.hasGeminiKey) {
+          setHasApiKey(true);
+          return;
+        }
+
+        // Fallback to AI Studio key selector if available
+        if ((window as any).aistudio) {
+          const selected = await (window as any).aistudio.hasSelectedApiKey();
+          setHasApiKey(selected);
+        } else {
+          setHasApiKey(false);
+        }
       } catch (e) {
         setHasApiKey(false);
       }
@@ -165,14 +179,6 @@ export default function App() {
       return;
     }
     
-    // Create a new instance right before the call to get the latest key
-    const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      setError("API Key not found. Please connect your Gemini API key.");
-      return;
-    }
-    const ai = new GoogleGenAI({ apiKey });
-
     setIsGenerating(true);
     setError(null);
     setIsSlow(false);
@@ -181,71 +187,44 @@ export default function App() {
     const slowTimer = setTimeout(() => setIsSlow(true), 30000);
 
     try {
-      // We generate 4 variations. 
-      // Note: gemini-3.1-flash-image-preview generates one image per call.
       const generateSingleImage = async (retryCount = 0): Promise<GeneratedImage | null> => {
         try {
-          const contents: any = {
-            parts: [
-              { text: prompt + (isRemix ? " (inspired by the reference image)" : "") }
-            ]
-          };
-
-          if (isRemix && referenceImage) {
-            contents.parts.unshift({
-              inlineData: {
-                data: referenceImage.split(',')[1],
-                mimeType: "image/png"
-              }
-            });
-          }
-
-          // Increased timeout to 300 seconds
-          const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error("Request timed out after 300 seconds")), 300000)
-          );
-
-          const apiPromise = ai.models.generateContent({
-            model: 'gemini-3.1-flash-image-preview',
-            contents,
-            config: {
-              imageConfig: {
-                aspectRatio,
-                imageSize
-              }
-            }
+          const response = await fetch('/api/generate-wallpaper', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              prompt,
+              aspectRatio,
+              imageSize,
+              referenceImage: isRemix ? referenceImage : null,
+              isRemix
+            })
           });
 
-          const response: any = await Promise.race([apiPromise, timeoutPromise]);
-
-          if (!response?.candidates?.[0]?.content?.parts) {
-            throw new Error("The model returned an empty response.");
+          if (!response.ok) {
+            const errData = await response.json();
+            throw new Error(errData.error || "Failed to generate image");
           }
 
-          for (const part of response.candidates[0].content.parts) {
-            if (part.inlineData) {
-              const newImg = {
-                id: Math.random().toString(36).substring(7),
-                url: `data:image/png;base64,${part.inlineData.data}`,
-                prompt,
-                timestamp: Date.now()
-              };
-              // Update state incrementally
-              setImages(prev => [...prev, newImg]);
-              return newImg;
-            }
-          }
-          throw new Error("No image data found.");
+          const data = await response.json();
+          const newImg = {
+            id: data.id,
+            url: `data:image/png;base64,${data.data}`,
+            prompt,
+            timestamp: Date.now()
+          };
+          
+          setImages(prev => [...prev, newImg]);
+          return newImg;
         } catch (err: any) {
-          if (retryCount < 1 && !err.message.includes("timed out")) {
-            console.log(`Retrying image generation... (Attempt ${retryCount + 2})`);
+          if (retryCount < 1) {
             return generateSingleImage(retryCount + 1);
           }
           throw err;
         }
       };
 
-      // Run in two sequential batches of 2 to avoid overwhelming the connection/rate limits
+      // Run in two sequential batches of 2
       await Promise.allSettled([generateSingleImage(), generateSingleImage()]);
       await Promise.allSettled([generateSingleImage(), generateSingleImage()]);
       
@@ -259,18 +238,11 @@ export default function App() {
       
     } catch (err: any) {
       console.error("Generation error:", err);
-      let message = err.message || "An unexpected error occurred.";
-      if (message.includes("429")) message = "Rate limit exceeded. Please wait a moment before trying again.";
-      if (message.includes("403")) {
-        message = "Permission denied. This model requires a paid Gemini API key. Please ensure you've selected a valid key in the setup.";
-        setHasApiKey(false);
-      }
-      setError(message);
+      setError(err.message || "An unexpected error occurred.");
     } finally {
       clearTimeout(slowTimer);
       setIsGenerating(false);
       setIsSlow(false);
-      // Success confetti if we have images
       setImages(currentImages => {
         if (currentImages.length > 0) {
           confetti({
