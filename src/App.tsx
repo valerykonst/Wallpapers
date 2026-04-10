@@ -80,6 +80,19 @@ export default function App() {
     };
     checkKey();
 
+    // Check for Stripe redirect params
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('success')) {
+      confetti({
+        particleCount: 150,
+        spread: 100,
+        origin: { y: 0.6 },
+        colors: ['#FBBF24', '#F59E0B', '#D97706'] // Gold colors for Pro
+      });
+      // Clear params without refresh
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       setUser(currentUser);
       setIsAuthLoading(false);
